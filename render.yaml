@@ -1,0 +1,23 @@
+# Render Blueprint for the Holla backend.
+# Deploy: render.com -> New -> Blueprint -> connect SteveFunso/holla-backend.
+services:
+  - type: web
+    name: holla-backend
+    runtime: node
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      # Persisted store path (ephemeral on free tier; set a disk for durability on paid plans).
+      - key: DATA_DIR
+        value: /tmp/holla-data
+      # Paste your Firebase service-account JSON here (one line) to enable push.
+      # Leave unset to run with the inbox-polling fallback only.
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false
