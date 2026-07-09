@@ -40,10 +40,13 @@ async function dispatchAlert(raw) {
   }
   const uniqueTokens = [...new Set(tokens)];
   const label = TRIGGER_LABEL[saved.trigger] || "a safety alert";
+  const isTest = typeof saved.note === "string" && /\b(test|drill)\b/i.test(saved.note);
   const push = await sendToTokens(
     uniqueTokens,
-    { title: `🚨 ${saved.sender_name || "Someone"} needs help`, body: `Detected ${label}. Tap to view location.` },
-    { type: "holla_alert", alert_id: saved.alert_id, trigger: saved.trigger },
+    isTest
+      ? { title: `🧪 Test from ${saved.sender_name || "someone"}`, body: `Drill: ${label}. No action needed.` }
+      : { title: `🚨 ${saved.sender_name || "Someone"} needs help`, body: `Detected ${label}. Tap to view location.` },
+    { type: "holla_alert", alert_id: saved.alert_id, trigger: saved.trigger, is_test: String(isTest) },
   );
 
   const loc = saved.location ? `${saved.location.lat},${saved.location.lng}` : "no location";
