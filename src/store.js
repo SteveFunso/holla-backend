@@ -19,7 +19,13 @@ function load() {
 }
 function save(db) { ensure(); fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); }
 
-// --- phone helpers (forgiving NG-aware matching) ---
+// --- Holla ID: the user's shareable identity (8-char alphanumeric, unambiguous charset) ---
+export function canonicalId(v) {
+  if (!v) return "";
+  return String(v).toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+// --- legacy phone helper (phone is now optional profile info, not identity) ---
 export function canonicalPhone(p) {
   if (!p) return "";
   let d = String(p).replace(/\D/g, "");
@@ -27,20 +33,17 @@ export function canonicalPhone(p) {
   else if (d.length === 10) d = "234" + d;                          // 80...  -> 23480...
   return d;
 }
-export function last9(p) {
-  const d = canonicalPhone(p);
-  return d.length >= 9 ? d.slice(-9) : d;
-}
+
+const TRAIL_CAP = 300;      // location points kept per alert
+const TRANSCRIPT_CAP = 500; // transcript lines kept per alert
 
 export const store = {
   upsertDevice(deviceId, patch) {
     const db = load();
     const prev = db.devices[deviceId] || { deviceId, guardians: [] };
     const next = { ...prev, ...patch, updatedTs: Date.now() };
-    if (patch.phone !== undefined) {
-      next.phone = canonicalPhone(patch.phone);
-      next.phoneLast9 = last9(patch.phone);
-    }
+    if (patch.phone !== undefined) next.phone = canonicalPhone(patch.phone);
+    if (patch.hollaId !== undefined) next.hollaId = canonicalId(patch.hollaId);
     db.devices[deviceId] = next;
     save(db);
     return next;
@@ -51,8 +54,8 @@ export const store = {
     const dev = db.devices[deviceId] || { deviceId };
     dev.guardians = (guardians || []).map((g) => ({
       name: g.name || "",
-      phone: canonicalPhone(g.phone),
-    }));
+      hollaId: canonicalId(g.hollaId || g.holla_id),
+    })).filter((g) => g.hollaId);
     dev.updatedTs = Date.now();
     db.devices[deviceId] = dev;
     save(db);
@@ -62,21 +65,21 @@ export const store = {
   getDevice(deviceId) { return load().devices[deviceId] || null; },
   allDevices() { return Object.values(load().devices); },
 
-  /** Registered devices whose phone matches (canonical or last-9). */
-  resolveByPhone(phone) {
-    const c = canonicalPhone(phone), l9 = last9(phone);
-    return this.allDevices().filter((d) => d.phone === c || d.phoneLast9 === l9);
+  /** Registered devices whose Holla ID matches. */
+  resolveById(hollaId) {
+    const c = canonicalId(hollaId);
+    if (!c) return [];
+    return this.allDevices().filter((d) => d.hollaId === c);
   },
 
   addAlert(alert) {
     const db = load();
     const id = alert.alert_id || `srv_${Date.now()}`;
-    const recipients = (alert.recipients || []).map(canonicalPhone).filter(Boolean);
+    const recipients = (alert.recipients || []).map(canonicalId).filter(Boolean);
     const record = {
       ...alert,
       alert_id: id,
       recipients,
-      recipients_last9: recipients.map((r) => r.slice(-9)),
       received_ts: Date.now(),
     };
     const i = db.alerts.findIndex((a) => a.alert_id === id);
@@ -88,16 +91,59 @@ export const store = {
     return record;
   },
 
-  /** Alerts addressed to this phone (the receiver inbox). */
-  inbox(phone, sinceTs = 0) {
-    const c = canonicalPhone(phone), l9 = last9(phone);
+  /** Live incident feed: append a location point and/or a transcript line to an alert. */
+  appendIncident(alertId, { location, transcript, ts }) {
+    const db = load();
+    const a = db.alerts.find((x) => x.alert_id === alertId);
+    if (!a) return null;
+    if (a.ended_ts) return a; // session was stood down — ignore late posts
+    const when = typeof ts === "number" ? ts : Date.now();
+    if (location && typeof location.lat === "number" && typeof location.lng === "number") {
+      a.trail = a.trail || [];
+      a.trail.push({ lat: location.lat, lng: location.lng, ts: when });
+      if (a.trail.length > TRAIL_CAP) a.trail = a.trail.slice(-TRAIL_CAP);
+      a.location = { ...(a.location || {}), lat: location.lat, lng: location.lng, fix_ts: when,
+        maps_url: `https://maps.google.com/?q=${location.lat},${location.lng}` };
+    }
+    if (transcript && String(transcript).trim()) {
+      a.transcript = a.transcript || [];
+      a.transcript.push({ text: String(transcript).trim().slice(0, 500), ts: when });
+      if (a.transcript.length > TRANSCRIPT_CAP) a.transcript = a.transcript.slice(-TRANSCRIPT_CAP);
+    }
+    a.live = true;
+    a.last_update_ts = Date.now();
+    save(db);
+    return a;
+  },
+
+  /** Sender stands the alert down — the circle stops seeing a live session. */
+  endAlert(alertId, deviceId) {
+    const db = load();
+    const a = db.alerts.find((x) => x.alert_id === alertId);
+    if (!a) return null;
+    if (deviceId && a.device_id && a.device_id !== deviceId) return "forbidden";
+    a.live = false;
+    a.ended_ts = Date.now();
+    save(db);
+    return a;
+  },
+
+  /** Alerts addressed to this Holla ID (the receiver inbox). */
+  inbox(hollaId, sinceTs = 0) {
+    const c = canonicalId(hollaId);
     return load()
       .alerts.filter(
         (a) =>
-          (a.received_ts || 0) >= sinceTs &&
-          ((a.recipients || []).includes(c) || (a.recipients_last9 || []).includes(l9)),
+          ((a.received_ts || 0) >= sinceTs || (a.last_update_ts || 0) >= sinceTs) &&
+          (a.recipients || []).includes(c),
       )
-      .sort((a, b) => (b.received_ts || 0) - (a.received_ts || 0));
+      .sort((a, b) => (b.received_ts || 0) - (a.received_ts || 0))
+      .map((a) => ({
+        ...a,
+        // keep inbox payloads small: recent tail only
+        trail: (a.trail || []).slice(-40),
+        transcript: (a.transcript || []).slice(-12),
+      }));
   },
 
   getAlert(id) { return load().alerts.find((a) => a.alert_id === id) || null; },

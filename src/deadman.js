@@ -22,7 +22,7 @@ export function startDeadmanLoop(dispatch, intervalMs = 15_000) {
           network: "server",
           note: "Device went dark — missed check-in. Last known location below.",
           location: device.lastLocation || null,
-          recipients: (device.guardians || []).map((g) => g.phone),
+          recipients: (device.guardians || []).map((g) => g.hollaId).filter(Boolean),
           server_raised: true,
         });
       }
